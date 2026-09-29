@@ -45,17 +45,17 @@ export function DriftTether() {
 
   return (
     <Line
-        ref={line}
-        points={[
-          [0, TETHER_Y, 0],
-          [0, TETHER_Y, 1],
-        ]}
-        color={COLORS.tether}
-        lineWidth={1.25}
-        dashed
-        dashSize={0.5}
-        gapSize={0.35}
-        renderOrder={30}
-      />
+      ref={line}
+      points={[
+        [0, TETHER_Y, 0],
+        [0, TETHER_Y, 1],
+      ]}
+      color={COLORS.tether}
+      lineWidth={1.25}
+      dashed
+      dashSize={0.5}
+      gapSize={0.35}
+      renderOrder={30}
+    />
   )
 }
