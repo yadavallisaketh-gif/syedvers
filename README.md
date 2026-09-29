@@ -26,6 +26,11 @@ cd web && npm install && npm run dev  # http://localhost:5173
 npm run build                         # type-check + production build in web/dist
 ```
 
+**Hosted on GitHub Pages:** https://yadavallisaketh-gif.github.io/syedvers/.
+`.github/workflows/deploy-pages.yml` publishes it on every push to `main` that touches `web/`. It
+also runs the build as a check on pull requests. One-time setup: **Settings → Pages → Build and
+deployment → Source: GitHub Actions**.
+
 - **Real engine output.** `scripts/export_web_data.py` runs `src/ui/sim.replay_window` (the same path as the
   Streamlit app, variant D, `sih_mvp` profile) on all 12 held-out 60 s windows. It writes every 10 Hz sample from
   20 s before GNSS loss to 15 s after it returns, plus every EKF measurement update. The export **fails**
