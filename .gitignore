@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# Dataset and run outputs (python -m src.download_data, python -m src.evaluate)
+data/
+outputs/
+
+# Web front-end
+web/node_modules/
+web/dist/
+web/.vite/
+web/test-results/
+*.tsbuildinfo
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

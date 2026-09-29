@@ -1,0 +1,1106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IDR Engine Blackout Replay</title>
+<meta name="description" content="Synthetic replay of the IDR Engine dead-reckoning through a 60 s GNSS blackout.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&family=Sora:wght@300;400;600&display=swap">
+<style>
+/* Layout: full-bleed canvas scene; glass HUD with brand top-left, GNSS badge top-right,
+   control panel on the right (desktop) or as a bottom sheet (<= 760px). Single dark look. */
+:root {
+  color-scheme: dark;
+  --bg-core: #11224d;
+  --bg-mid: #0a1531;
+  --bg-edge: #050a17;
+  --ink: #e9eefb;
+  --ink-2: #a3b0cf;
+  --ink-3: #6b7794;
+  --truth: #5dffa8;
+  --est: #4cc9ff;
+  --tether: #ffb84d;
+  --alert: #ff5d6c;
+  --mnet: #b69cff;
+  --glass: rgba(13, 21, 44, 0.58);
+  --glass-strong: rgba(10, 17, 37, 0.8);
+  --line: rgba(170, 195, 255, 0.12);
+  --line-strong: rgba(170, 195, 255, 0.24);
+  --font-ui: "Sora", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-num: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --r-lg: 18px;
+  --r-md: 12px;
+  --r-pill: 999px;
+  --panel-w: 344px;
+  --edge: 22px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+}
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--bg-edge);
+  background-image: radial-gradient(120% 90% at 40% 64%, var(--bg-core) 0%, var(--bg-mid) 46%, var(--bg-edge) 100%);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+
+#scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+
+/* ---------- brand + GNSS badge */
+.brand {
+  position: fixed;
+  top: calc(20px + var(--safe-t));
+  left: calc(var(--edge) + var(--safe-l));
+  max-width: min(52vw, 420px);
+  pointer-events: none;
+}
+.brand h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+.brand p { margin: 4px 0 0; font-size: 13px; font-weight: 300; line-height: 1.4; color: var(--ink-2); text-wrap: balance; }
+.chip {
+  display: inline-flex;
+  margin-top: 10px;
+  padding: 5px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-pill);
+  font: 500 10px/1 var(--font-num);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.gnss {
+  --c: var(--truth);
+  position: fixed;
+  top: calc(20px + var(--safe-t));
+  right: calc(var(--edge) + var(--safe-r));
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--glass);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.gnss .dot { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+.gnss .sub { font: 400 12px var(--font-num); color: var(--ink-2); }
+.gnss[data-state="lost"] { --c: var(--alert); border-color: rgba(255, 93, 108, 0.38); }
+.gnss[data-state="lost"] .dot::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+  border: 1.5px solid var(--alert);
+  border-radius: 50%;
+  animation: pulse 1.6s ease-out infinite;
+}
+@keyframes pulse { from { transform: scale(0.5); opacity: 0.9; } to { transform: scale(1.9); opacity: 0; } }
+
+/* ---------- notifications */
+.toasts {
+  position: fixed;
+  z-index: 5;
+  top: calc(20px + var(--safe-t));
+  left: calc((100% - var(--panel-w) - 2 * var(--edge)) / 2);
+  transform: translateX(-50%);
+  width: min(360px, calc(100% - 2 * var(--edge)));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.toast {
+  --c: var(--est);
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--glass-strong);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: 0 12px 32px rgba(2, 6, 18, 0.45);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.35s ease, transform 0.35s ease;
+}
+.toast.in { opacity: 1; transform: none; }
+.toast.out { opacity: 0; transform: translateY(-6px); }
+.toast svg { width: 18px; height: 18px; color: var(--c); }
+.toast[data-kind="danger"] { --c: var(--alert); border-color: rgba(255, 93, 108, 0.32); }
+.toast[data-kind="caution"] { --c: var(--tether); border-color: rgba(255, 184, 77, 0.3); }
+.toast[data-kind="success"] { --c: var(--truth); border-color: rgba(93, 255, 168, 0.28); }
+.toast[data-kind="info"] { --c: var(--est); }
+.toast[data-kind="summary"] { --c: var(--ink-2); }
+.toast-title { font-size: 13px; font-weight: 600; }
+.toast-body { margin-top: 2px; font-size: 12px; line-height: 1.45; color: var(--ink-2); }
+.toast-time { font: 400 11px var(--font-num); color: var(--ink-3); }
+
+/* ---------- panel */
+.panel {
+  position: fixed;
+  top: calc(76px + var(--safe-t));
+  right: calc(var(--edge) + var(--safe-r));
+  width: var(--panel-w);
+  max-height: calc(100% - 96px - var(--safe-t) - var(--safe-b));
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 20px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--glass);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: 0 24px 64px rgba(2, 6, 18, 0.5);
+}
+.label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+
+.hero-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-top: 6px; }
+.big { display: flex; align-items: baseline; gap: 6px; }
+.big b { font: 300 60px/0.95 var(--font-num); letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+.big small { font-size: 16px; font-weight: 300; color: var(--ink-2); }
+.drift { text-align: right; }
+.drift b { font: 400 22px/1 var(--font-num); font-variant-numeric: tabular-nums; }
+.drift small { margin-left: 2px; font-size: 13px; color: var(--ink-2); }
+.drift .label { margin-top: 6px; }
+
+#spark { display: block; width: 100%; height: 64px; margin-top: 16px; }
+.progress { margin-top: 10px; }
+.bar { height: 3px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.bar span { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--alert); }
+.bar[data-done="true"] span { background: var(--truth); }
+.progress-meta { display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: var(--ink-3); }
+
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+.stat-k { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.stat-k i { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--c); }
+.stat-v { margin-top: 6px; }
+.stat-v b { font: 400 19px var(--font-num); font-variant-numeric: tabular-nums; }
+.stat-v small { display: block; margin-top: 2px; font-size: 10.5px; color: var(--ink-3); }
+
+.controls { display: flex; flex-direction: column; gap: 12px; padding-top: 16px; border-top: 1px solid var(--line); }
+.controls-row { display: flex; align-items: center; gap: 8px; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-pill);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink);
+  font: 600 13px var(--font-ui);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+.btn:hover { background: rgba(255, 255, 255, 0.09); }
+.btn svg { width: 14px; height: 14px; }
+.btn.icon { width: 36px; padding: 0; }
+.btn.primary { min-width: 96px; background: var(--ink); border-color: var(--ink); color: #0a1226; }
+.btn.primary:hover { background: #ffffff; }
+:where(button, input):focus-visible { outline: 2px solid var(--est); outline-offset: 2px; }
+
+.speeds { display: flex; margin-left: auto; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-pill); }
+.speeds button {
+  height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-2);
+  font: 500 12px var(--font-num);
+  cursor: pointer;
+}
+.speeds button[aria-checked="true"] { background: rgba(255, 255, 255, 0.12); color: var(--ink); }
+
+#timeline {
+  --p: 0%;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+#timeline::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, rgba(233, 238, 251, 0.55) var(--p), transparent var(--p)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 5.714%, rgba(255, 93, 108, 0.32) 5.714%, rgba(255, 93, 108, 0.32) 91.43%, rgba(255, 255, 255, 0.08) 91.43%);
+}
+#timeline::-moz-range-track {
+  height: 4px;
+  border-radius: 4px;
+  background:
+    linear-gradient(90deg, rgba(233, 238, 251, 0.55) var(--p), transparent var(--p)),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 5.714%, rgba(255, 93, 108, 0.32) 5.714%, rgba(255, 93, 108, 0.32) 91.43%, rgba(255, 255, 255, 0.08) 91.43%);
+}
+#timeline::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink);
+  box-shadow: 0 0 0 4px rgba(233, 238, 251, 0.12);
+}
+#timeline::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink);
+  box-shadow: 0 0 0 4px rgba(233, 238, 251, 0.12);
+}
+.time-row { display: flex; justify-content: space-between; margin-top: -4px; font-size: 11px; color: var(--ink-3); }
+.time-row #clock { color: var(--ink); }
+
+.log { display: flex; flex-direction: column; gap: 3px; min-height: 76px; padding-top: 14px; border-top: 1px solid var(--line); }
+.log div { font: 400 11.5px/1.5 var(--font-num); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log div:nth-child(1) { opacity: 0.22; }
+.log div:nth-child(2) { opacity: 0.42; }
+.log div:nth-child(3) { opacity: 0.68; }
+.log div:nth-child(4) { opacity: 1; color: var(--ink); }
+
+.note { font-size: 11px; line-height: 1.5; color: var(--ink-3); }
+
+/* ---------- phones: bottom sheet */
+@media (max-width: 760px) {
+  :root { --edge: 16px; }
+  .brand h1 { font-size: 18px; }
+  .brand p { font-size: 12px; }
+  .brand .chip { margin-top: 8px; }
+  .gnss { padding: 7px 12px 7px 10px; font-size: 12px; }
+  .toasts { left: var(--edge); right: var(--edge); width: auto; transform: none; top: calc(112px + var(--safe-t)); }
+  .panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 56%;
+    gap: 14px;
+    padding: 12px 16px calc(14px + var(--safe-b));
+    border-width: 1px 0 0;
+    border-radius: 22px 22px 0 0;
+  }
+  .panel::before { content: ""; align-self: center; width: 36px; height: 4px; border-radius: 4px; background: var(--line-strong); }
+  .big b { font-size: 46px; }
+  #spark { height: 52px; margin-top: 12px; }
+  .log { min-height: 0; }
+  .note { display: none; }
+}
+@media (max-width: 420px) {
+  .gnss .sub { display: none; }
+  .speeds button { padding: 0 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gnss[data-state="lost"] .dot::after { animation: none; opacity: 0.5; transform: scale(1.3); }
+  .toast { transition: none; }
+}
+</style>
+</head>
+<body>
+<canvas id="scene" role="img" aria-label="Top-down replay: the true car on a green road and the dead-reckoning estimate in blue drifting away from it during a GNSS blackout."></canvas>
+
+<header class="brand">
+  <h1>IDR Engine</h1>
+  <p>Dead reckoning through a 60&nbsp;s GNSS blackout</p>
+  <span class="chip">Synthetic data</span>
+</header>
+
+<div class="gnss" id="gnss" data-state="fix" role="status">
+  <span class="dot" aria-hidden="true"></span>
+  <span id="gnssText">GNSS fix</span>
+  <span class="sub" id="gnssSub">locked</span>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<aside class="panel" aria-label="Replay telemetry and controls">
+  <section>
+    <div class="label">Position error</div>
+    <div class="hero-row">
+      <div class="big"><b id="err">0.0</b><small>m</small></div>
+      <div class="drift"><b id="drift">–</b><small>%</small><div class="label" id="driftLabel">drift</div></div>
+    </div>
+    <canvas id="spark" aria-hidden="true"></canvas>
+    <div class="progress">
+      <div class="bar" id="bar"><span id="barFill"></span></div>
+      <div class="progress-meta"><span>Blackout</span><span class="mono" id="blk">0.0 / 60 s</span></div>
+    </div>
+  </section>
+
+  <section class="stats" aria-label="Speeds">
+    <div class="stat"><div class="stat-k"><i style="--c: var(--est)"></i>EKF</div><div class="stat-v"><b id="sEkf">0.0</b><small>km/h</small></div></div>
+    <div class="stat"><div class="stat-k"><i style="--c: var(--mnet)"></i>MotionNet</div><div class="stat-v"><b id="sMn">idle</b><small>km/h</small></div></div>
+    <div class="stat"><div class="stat-k"><i style="--c: var(--truth)"></i>Truth</div><div class="stat-v"><b id="sTruth">0.0</b><small>km/h</small></div></div>
+  </section>
+
+  <section class="controls" aria-label="Playback">
+    <div class="controls-row">
+      <button class="btn primary" id="play" type="button" aria-keyshortcuts="Space">
+        <svg id="playIcon" viewBox="0 0 14 14" aria-hidden="true"><path fill="currentColor" d="M3 2h3v10H3zM8 2h3v10H8z"/></svg>
+        <span id="playText">Pause</span>
+      </button>
+      <button class="btn icon" id="restart" type="button" aria-label="Restart replay" title="Restart (R)">
+        <svg viewBox="0 0 14 14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M2.6 7a4.4 4.4 0 1 0 1.3-3.1M2.4 1.8v2.6H5"/></svg>
+      </button>
+      <div class="speeds" role="radiogroup" aria-label="Playback speed">
+        <button type="button" role="radio" aria-checked="true" data-speed="1">1×</button>
+        <button type="button" role="radio" aria-checked="false" data-speed="5">5×</button>
+        <button type="button" role="radio" aria-checked="false" data-speed="10">10×</button>
+      </div>
+    </div>
+    <input id="timeline" type="range" min="-4" max="66" step="0.1" value="-4" aria-label="Replay time in seconds from GNSS loss" aria-keyshortcuts="ArrowLeft ArrowRight">
+    <div class="time-row mono"><span>T−4 s</span><span id="clock">T−4.0 s</span><span>T+66 s</span></div>
+  </section>
+
+  <section class="log" id="log" aria-label="Live telemetry"></section>
+
+  <p class="note">Synthetic trajectory generated in the browser. It illustrates the method and is not engine output. Space play/pause · ← → scrub · R restart.</p>
+</aside>
+
+<script>
+(() => {
+  'use strict'
+
+  // ================================================================ simulation
+  // Everything below is synthetic. The truth path is integrated from a smooth speed and
+  // turn-rate profile; the estimate integrates the same motion with the error sources a
+  // phone IMU leaves uncorrected once GNSS drops.
+  const DT = 0.1           // s, precompute step
+  const T0 = -4            // s, replay starts 4 s before GNSS loss
+  const T1 = 66            // s, and ends 6 s after GNSS returns
+  const TS = T0 - 16       // s, the road is simulated beyond the replay window on both ends
+  const TE = T1 + 36       //    so it never visibly starts or stops on screen
+  const BLACKOUT = 60      // s
+  const HEADING_BIAS = 0.0004 // rad/s, uncorrected gyro bias
+  const SPEED_SCALE = 0.006   // 0.6 % speed scale error
+  const ALIGN_ERR = 0.0025    // rad (0.14 deg) heading misalignment at the moment GNSS drops
+  const REANCHOR_TAU = 0.9    // s, convergence once GNSS is back
+  const MN_START = 1.5        // s, MotionNet speed aiding engages
+  const LANE_HALF = 3.5       // m
+
+  const speedAt = (t) => 10 + 1.1 * Math.sin((2 * Math.PI * t) / 23) + 0.5 * Math.sin((2 * Math.PI * t) / 9.7 + 0.6)
+  const turnAt = (t) => 0.055 * Math.sin((2 * Math.PI * t) / 31 + 0.4) + 0.03 * Math.sin((2 * Math.PI * t) / 13 + 1.1)
+
+  function simulate() {
+    const n = Math.round((TE - TS) / DT) + 1
+    const col = () => new Float64Array(n)
+    const S = { n, t: col(), x: col(), y: col(), th: col(), v: col(), s: col(),
+      ex: col(), ey: col(), eth: col(), ev: col(), mn: col(), err: col(), dist: col() }
+    let th = 0.9, x = 0, y = 0, s = 0, dist = 0
+    let ex = 0, ey = 0, eth = th, offX = 0, offY = 0, offTh = 0
+    for (let k = 0; k < n; k++) {
+      const t = Math.round((TS + k * DT) * 1e6) / 1e6
+      const v = speedAt(t)
+      const w = turnAt(t)
+      if (k > 0) {
+        const px = x, py = y
+        th += w * DT
+        x += v * Math.cos(th) * DT
+        y += v * Math.sin(th) * DT
+        const step = Math.hypot(x - px, y - py)
+        s += step
+        if (t > 0 && t <= BLACKOUT) dist += step
+      }
+      let ev
+      if (t < 0) {
+        // GNSS-aided: the filter hugs the fix with a few decimetres of noise
+        ex = x + 0.16 * Math.sin(1.3 * t + 0.4)
+        ey = y + 0.12 * Math.cos(1.7 * t)
+        eth = th
+        ev = v * (1 + 0.002 * Math.sin(2.1 * t))
+      } else if (t === 0) {
+        ex = x; ey = y; eth = th + ALIGN_ERR; ev = v
+      } else if (t <= BLACKOUT) {
+        eth += (w + HEADING_BIAS) * DT
+        ev = v * (1 + SPEED_SCALE)
+        ex += ev * Math.cos(eth) * DT
+        ey += ev * Math.sin(eth) * DT
+        if (t === BLACKOUT) { offX = ex - x; offY = ey - y; offTh = eth - th }
+      } else {
+        const g = Math.exp(-(t - BLACKOUT) / REANCHOR_TAU)
+        ex = x + offX * g; ey = y + offY * g; eth = th + offTh * g; ev = v
+      }
+      S.t[k] = t; S.x[k] = x; S.y[k] = y; S.th[k] = th; S.v[k] = v; S.s[k] = s
+      S.ex[k] = ex; S.ey[k] = ey; S.eth[k] = eth; S.ev[k] = ev
+      S.mn[k] = t >= MN_START && t <= BLACKOUT ? v + 0.28 * Math.sin(1.9 * t + 0.3) + 0.14 * Math.sin(5.1 * t) : NaN
+      S.err[k] = Math.hypot(ex - x, ey - y)
+      S.dist[k] = dist
+    }
+    return S
+  }
+
+  const S = simulate()
+  const idxOf = (t) => Math.min(Math.max(Math.round((t - TS) / DT), 0), S.n - 1)
+  const K0 = idxOf(T0), K1 = idxOf(T1)
+  const K_BLACKOUT_END = idxOf(BLACKOUT)
+  const FINAL = { err: S.err[K_BLACKOUT_END], dist: S.dist[K_BLACKOUT_END] }
+  FINAL.drift = (100 * FINAL.err) / FINAL.dist
+  let t5 = null
+  for (let k = idxOf(0); k <= K_BLACKOUT_END; k++) if (S.err[k] >= 5) { t5 = S.t[k]; break }
+  const ERR_MAX = Math.max(...S.err.subarray(K0, K1 + 1))
+
+  function sampleAt(t) {
+    const f = Math.min(Math.max((t - TS) / DT, 0), S.n - 1)
+    const i = Math.floor(f)
+    const j = Math.min(i + 1, S.n - 1)
+    const a = f - i
+    const L = (arr) => arr[i] + (arr[j] - arr[i]) * a
+    const x = L(S.x), y = L(S.y), ex = L(S.ex), ey = L(S.ey)
+    return {
+      i, x, y, ex, ey,
+      th: L(S.th), eth: L(S.eth), v: L(S.v), ev: L(S.ev), s: L(S.s), dist: L(S.dist),
+      mn: Number.isNaN(S.mn[i]) || Number.isNaN(S.mn[j]) ? NaN : L(S.mn),
+      err: Math.hypot(ex - x, ey - y),
+    }
+  }
+
+  // ================================================================ events + telemetry
+  const fmtStamp = (t) => (t < 0 ? '−' : '+') + Math.abs(t).toFixed(2).padStart(5, '0')
+  const fmtT = (t) => `T${t < 0 ? '−' : '+'}${Math.abs(t).toFixed(1)} s`
+
+  const EVENTS = [
+    { t: 0, kind: 'danger', title: 'GNSS signal lost', body: 'Switching to inertial dead reckoning. Position now comes from the IMU and MotionNet only.' },
+    { t: MN_START, kind: 'info', title: 'MotionNet speed aiding on', body: 'Learned speed replaces GNSS velocity in the filter.' },
+    t5 !== null && { t: t5, kind: 'caution', title: 'Drift above 5 m', body: `Estimate is 5 m from truth after ${Math.round(S.dist[idxOf(t5)])} m without GNSS. Uncertainty is growing.` },
+    { t: BLACKOUT, kind: 'success', title: 'GNSS reacquired', body: 'Fix restored after 60 s. Re-anchoring the estimate.' },
+    { t: BLACKOUT + 1.5, kind: 'summary', title: 'Blackout complete', body: `Final error ${FINAL.err.toFixed(1)} m over ${Math.round(FINAL.dist)} m, ${FINAL.drift.toFixed(2)} % drift.` },
+  ].filter(Boolean)
+
+  const LOG = []
+  for (let k = K0; k <= K1; k += 5) {
+    LOG.push({ t: S.t[k], text: `${fmtStamp(S.t[k])}  err ${S.err[k].toFixed(2)} m  v ${S.ev[k].toFixed(2)} m/s` })
+  }
+  for (const [t, text] of [[0, 'GNSS lost · dead reckoning'], [MN_START, 'MotionNet aiding on'], [BLACKOUT, 'GNSS fix · re-anchoring']]) {
+    LOG.push({ t: t + 1e-4, text: `${fmtStamp(t)}  ${text}` })
+  }
+  LOG.sort((a, b) => a.t - b.t)
+
+  // ================================================================ DOM
+  const $ = (id) => document.getElementById(id)
+  const scene = $('scene')
+  const ctx = scene.getContext('2d')
+  const spark = $('spark')
+  const sctx = spark.getContext('2d')
+  const panel = document.querySelector('.panel')
+  const ui = {
+    err: $('err'), drift: $('drift'), driftLabel: $('driftLabel'), blk: $('blk'), bar: $('bar'), barFill: $('barFill'),
+    ekf: $('sEkf'), mn: $('sMn'), truth: $('sTruth'), clock: $('clock'), timeline: $('timeline'),
+    play: $('play'), playText: $('playText'), playIcon: $('playIcon'), restart: $('restart'),
+    gnss: $('gnss'), gnssText: $('gnssText'), gnssSub: $('gnssSub'), log: $('log'), toasts: $('toasts'),
+  }
+  const setText = (el, text) => { if (el.textContent !== text) el.textContent = text }
+
+  const css = getComputedStyle(document.documentElement)
+  const token = (name) => css.getPropertyValue(name).trim()
+  const hexRgb = (hex) => { const n = parseInt(hex.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255] }
+  const C = {
+    truth: token('--truth'), est: token('--est'), tether: token('--tether'), alert: token('--alert'),
+    ink: token('--ink'), ink2: token('--ink-2'), edge: token('--bg-edge'),
+  }
+  const RGB = { truth: hexRgb(C.truth), est: hexRgb(C.est), tether: hexRgb(C.tether), alert: hexRgb(C.alert), edge: hexRgb(C.edge) }
+  const rgba = (rgb, a) => `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${a})`
+  const FONT_NUM = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace'
+  const FONT_UI = '"Sora", ui-sans-serif, system-ui, sans-serif'
+
+  // ================================================================ state
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches
+  const state = { t: T0, playing: !reduceMotion, speed: 1, dragging: false }
+  if (reduceMotion) state.t = 45 // open on an informative still frame instead of animating
+  let firedUpTo = state.t
+
+  // ================================================================ layout + camera
+  const view = { W: 0, H: 0, dpr: 1, ax: 0, ay: 0, zoom: 10, sheet: false }
+  const PERSP = 0.0045 // perspective falloff per metre ahead
+  const SQUASH = 0.5   // tilted top-down: ground y squashed
+  const LIFT = 0.85    // screen rise per metre of height
+  const F_MIN = -140   // m behind the camera still projected
+
+  function resize() {
+    view.dpr = Math.min(window.devicePixelRatio || 1, 2)
+    view.W = window.innerWidth
+    view.H = window.innerHeight
+    scene.width = Math.round(view.W * view.dpr)
+    scene.height = Math.round(view.H * view.dpr)
+    view.sheet = matchMedia('(max-width: 760px)').matches
+    const r = panel.getBoundingClientRect()
+    if (view.sheet) {
+      const top = 120
+      view.ax = view.W / 2
+      view.ay = top + Math.max(r.top - top, 160) * 0.72
+      view.zoom = Math.min(Math.max(view.W / 58, 7), 11)
+    } else {
+      const free = Math.max(r.left - 20, view.W * 0.5)
+      view.ax = free / 2
+      view.ay = view.H * 0.66
+      view.zoom = Math.min(Math.max(free / 70, 8), 15)
+    }
+    const sr = spark.getBoundingClientRect()
+    spark.width = Math.max(1, Math.round(sr.width * view.dpr))
+    spark.height = Math.max(1, Math.round(sr.height * view.dpr))
+  }
+
+  const cam = { x: 0, y: 0, c: 1, s: 0 }
+  const P = { x: 0, y: 0, k: 1, f: 0 }
+  function project(wx, wy, h = 0, out = P) {
+    const dx = wx - cam.x
+    const dy = wy - cam.y
+    const f = dx * cam.c + dy * cam.s   // metres ahead of the camera
+    const r = dx * cam.s - dy * cam.c   // metres to the right
+    const fc = f < F_MIN ? F_MIN : f
+    const k = 1 / (1 + fc * PERSP)
+    out.x = view.ax + r * view.zoom * k
+    out.y = view.ay - (fc * SQUASH + h * LIFT) * view.zoom * k
+    out.k = k
+    out.f = f
+    return out
+  }
+  const fwd = (wx, wy) => (wx - cam.x) * cam.c + (wy - cam.y) * cam.s
+
+  // ================================================================ drawing
+  function drawGrid() {
+    const R = 240, STEP = 10, FA = -90, FB = 280
+    const minor = new Path2D(), major = new Path2D()
+    const a = { x: 0, y: 0, k: 1, f: 0 }, b = { x: 0, y: 0, k: 1, f: 0 }
+    const seg = (x1, y1, x2, y2, path) => {
+      const f1 = fwd(x1, y1), f2 = fwd(x2, y2)
+      let u0 = 0, u1 = 1
+      if (Math.abs(f2 - f1) < 1e-9) {
+        if (f1 < FA || f1 > FB) return
+      } else {
+        const ua = (FA - f1) / (f2 - f1), ub = (FB - f1) / (f2 - f1)
+        u0 = Math.max(0, Math.min(ua, ub))
+        u1 = Math.min(1, Math.max(ua, ub))
+        if (u0 >= u1) return
+      }
+      project(x1 + (x2 - x1) * u0, y1 + (y2 - y1) * u0, 0, a)
+      project(x1 + (x2 - x1) * u1, y1 + (y2 - y1) * u1, 0, b)
+      path.moveTo(a.x, a.y)
+      path.lineTo(b.x, b.y)
+    }
+    const gx0 = Math.floor((cam.x - R) / STEP) * STEP, gy0 = Math.floor((cam.y - R) / STEP) * STEP
+    for (let g = gx0; g <= cam.x + R; g += STEP) seg(g, cam.y - R, g, cam.y + R, Math.round(g) % 50 === 0 ? major : minor)
+    for (let g = gy0; g <= cam.y + R; g += STEP) seg(cam.x - R, g, cam.x + R, g, Math.round(g) % 50 === 0 ? major : minor)
+    ctx.lineWidth = 1
+    ctx.strokeStyle = 'rgba(120, 160, 255, 0.05)'
+    ctx.stroke(minor)
+    ctx.strokeStyle = 'rgba(120, 160, 255, 0.1)'
+    ctx.stroke(major)
+  }
+
+  function drawRoad(cur) {
+    const i0 = Math.max(0, cur - 100), i1 = Math.min(S.n - 1, cur + 340)
+    const left = [], right = [], center = new Path2D()
+    const q = { x: 0, y: 0, k: 1, f: 0 }
+    for (let i = i0; i <= i1; i++) {
+      const nx = Math.sin(S.th[i]), ny = -Math.cos(S.th[i]) // right-hand normal
+      project(S.x[i] - nx * LANE_HALF, S.y[i] - ny * LANE_HALF, 0, q); left.push(q.x, q.y)
+      project(S.x[i] + nx * LANE_HALF, S.y[i] + ny * LANE_HALF, 0, q); right.push(q.x, q.y)
+      project(S.x[i], S.y[i], 0, q)
+      if (i === i0) center.moveTo(q.x, q.y); else center.lineTo(q.x, q.y)
+    }
+    // translucent lane
+    const lane = new Path2D()
+    lane.moveTo(left[0], left[1])
+    for (let p = 2; p < left.length; p += 2) lane.lineTo(left[p], left[p + 1])
+    for (let p = right.length - 2; p >= 0; p -= 2) lane.lineTo(right[p], right[p + 1])
+    lane.closePath()
+    const g = ctx.createLinearGradient(0, view.ay + 160, 0, 0)
+    g.addColorStop(0, rgba(RGB.truth, 0.1))
+    g.addColorStop(1, rgba(RGB.truth, 0.025))
+    ctx.fillStyle = g
+    ctx.fill(lane)
+    // lane edges
+    const edges = new Path2D()
+    edges.moveTo(left[0], left[1]); for (let p = 2; p < left.length; p += 2) edges.lineTo(left[p], left[p + 1])
+    edges.moveTo(right[0], right[1]); for (let p = 2; p < right.length; p += 2) edges.lineTo(right[p], right[p + 1])
+    ctx.strokeStyle = rgba(RGB.truth, 0.22)
+    ctx.lineWidth = 1
+    ctx.stroke(edges)
+    // glowing centre line; dashes are laid out in metres along the road, so they stay fixed
+    // to the ground and shorten with perspective
+    const DASH = 3.2, PERIOD = 7
+    const dashes = new Path2D()
+    let pen = false
+    for (let i = i0; i < i1; i++) {
+      const s0 = S.s[i], s1 = S.s[i + 1]
+      if (s1 - s0 < 1e-9) continue
+      let a = s0
+      while (a < s1) {
+        const ph = a % PERIOD
+        const on = ph < DASH
+        const b = Math.min(s1, a - ph + (on ? DASH : PERIOD))
+        if (on) {
+          const u0 = (a - s0) / (s1 - s0), u1 = (b - s0) / (s1 - s0)
+          if (!pen) {
+            project(S.x[i] + (S.x[i + 1] - S.x[i]) * u0, S.y[i] + (S.y[i + 1] - S.y[i]) * u0, 0, q)
+            dashes.moveTo(q.x, q.y)
+          }
+          project(S.x[i] + (S.x[i + 1] - S.x[i]) * u1, S.y[i] + (S.y[i + 1] - S.y[i]) * u1, 0, q)
+          dashes.lineTo(q.x, q.y)
+        }
+        pen = on && b < s1 ? false : on
+        a = b + 1e-7
+      }
+    }
+    ctx.save()
+    ctx.lineCap = 'round'
+    ctx.shadowColor = rgba(RGB.truth, 0.9)
+    ctx.shadowBlur = 16
+    ctx.strokeStyle = rgba(RGB.truth, 0.18)
+    ctx.lineWidth = 7
+    ctx.stroke(center)
+    ctx.shadowBlur = 10
+    ctx.strokeStyle = rgba(RGB.truth, 0.95)
+    ctx.lineWidth = 2
+    ctx.stroke(dashes)
+    ctx.restore()
+  }
+
+  function drawMarker(t, rgb, text) {
+    const k = idxOf(t)
+    if (fwd(S.x[k], S.y[k]) < -60 || fwd(S.x[k], S.y[k]) > 240) return
+    const ring = new Path2D()
+    const q = { x: 0, y: 0, k: 1, f: 0 }
+    for (let a = 0; a <= 32; a++) {
+      const ang = (a / 32) * Math.PI * 2
+      project(S.x[k] + Math.cos(ang) * 4.6, S.y[k] + Math.sin(ang) * 4.6, 0, q)
+      if (a === 0) ring.moveTo(q.x, q.y); else ring.lineTo(q.x, q.y)
+    }
+    ctx.strokeStyle = rgba(rgb, 0.65)
+    ctx.lineWidth = 1.25
+    ctx.setLineDash([3, 4])
+    ctx.stroke(ring)
+    ctx.setLineDash([])
+    project(S.x[k], S.y[k], 0, q)
+    const lx = q.x + 6.5 * view.zoom * q.k, ly = q.y
+    ctx.font = `600 10.5px ${FONT_UI}`
+    const w = ctx.measureText(text).width + 14
+    ctx.fillStyle = 'rgba(8, 14, 30, 0.8)'
+    roundRect(lx, ly - 10, w, 20, 10)
+    ctx.fill()
+    ctx.strokeStyle = rgba(rgb, 0.45)
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.fillStyle = rgba(rgb, 0.95)
+    ctx.textBaseline = 'middle'
+    ctx.fillText(text, lx + 7, ly + 0.5)
+  }
+
+  function drawTrail(cur, now) {
+    const i0 = idxOf(-3)
+    if (cur < i0) return
+    const path = new Path2D()
+    const q = { x: 0, y: 0, k: 1, f: 0 }
+    for (let i = i0; i <= cur; i++) {
+      project(S.ex[i], S.ey[i], 0, q)
+      if (i === i0) path.moveTo(q.x, q.y); else path.lineTo(q.x, q.y)
+    }
+    project(now.ex, now.ey, 0, q)
+    path.lineTo(q.x, q.y)
+    ctx.save()
+    ctx.lineJoin = 'round'
+    ctx.lineCap = 'round'
+    ctx.shadowColor = rgba(RGB.est, 0.9)
+    ctx.shadowBlur = 16
+    ctx.strokeStyle = rgba(RGB.est, 0.18)
+    ctx.lineWidth = 8
+    ctx.stroke(path)
+    ctx.shadowBlur = 10
+    ctx.strokeStyle = rgba(RGB.est, 1)
+    ctx.lineWidth = 2.4
+    ctx.stroke(path)
+    ctx.restore()
+  }
+
+  function drawFog() {
+    const g = ctx.createLinearGradient(0, 0, 0, view.ay * 0.62)
+    g.addColorStop(0, rgba(RGB.edge, 0.92))
+    g.addColorStop(1, rgba(RGB.edge, 0))
+    ctx.fillStyle = g
+    ctx.fillRect(0, 0, view.W, view.ay * 0.62)
+  }
+
+  function drawEllipse(now) {
+    const along = 1.6 + 0.85 * now.err
+    const cross = 1.2 + 0.6 * now.err
+    const fx = Math.cos(now.eth), fy = Math.sin(now.eth)
+    const rx = Math.sin(now.eth), ry = -Math.cos(now.eth)
+    const path = new Path2D()
+    const q = { x: 0, y: 0, k: 1, f: 0 }
+    for (let a = 0; a <= 72; a++) {
+      const ang = (a / 72) * Math.PI * 2
+      const ca = Math.cos(ang) * along, sa = Math.sin(ang) * cross
+      project(now.ex + fx * ca + rx * sa, now.ey + fy * ca + ry * sa, 0.04, q)
+      if (a === 0) path.moveTo(q.x, q.y); else path.lineTo(q.x, q.y)
+    }
+    ctx.fillStyle = rgba(RGB.est, 0.045)
+    ctx.fill(path)
+    ctx.strokeStyle = rgba(RGB.est, 0.6)
+    ctx.lineWidth = 1.25
+    ctx.setLineDash([4, 6])
+    ctx.stroke(path)
+    ctx.setLineDash([])
+  }
+
+  // extruded prism between a bottom and a top rectangle (local forward/right extents, metres),
+  // faces painted back to front; `side(lit)` colours a side face for a lighting factor 0..1
+  function drawPrism(px, py, head, bot, top, side, topFill, extra) {
+    const c = Math.cos(head), s = Math.sin(head)
+    const world = (fw, rt) => [px + fw * c + rt * s, py + fw * s - rt * c]
+    const rect = (r) => [world(r.f0, -r.half), world(r.f1, -r.half), world(r.f1, r.half), world(r.f0, r.half)]
+    const fb = rect(bot), ft = rect(top)
+    const B = fb.map(([x, y]) => { const q = project(x, y, bot.h, {}); return [q.x, q.y] })
+    const T = ft.map(([x, y]) => { const q = project(x, y, top.h, {}); return [q.x, q.y] })
+    // key light from behind-left of the camera, so faces turned to the viewer read mid-tone
+    const lx = Math.cos(cam.th + Math.PI - 0.6), ly = Math.sin(cam.th + Math.PI - 0.6)
+    const faces = []
+    for (let e = 0; e < 4; e++) {
+      const n = (e + 1) % 4
+      const mx = (fb[e][0] + fb[n][0]) / 2 - px, my = (fb[e][1] + fb[n][1]) / 2 - py
+      const len = Math.hypot(mx, my) || 1
+      faces.push({ e, q: [B[e], B[n], T[n], T[e]], depth: (B[e][1] + B[n][1]) / 2, lit: Math.max(0, (mx * lx + my * ly) / len) })
+    }
+    faces.sort((a, b) => a.depth - b.depth)
+    for (const f of faces) {
+      ctx.beginPath()
+      ctx.moveTo(f.q[0][0], f.q[0][1])
+      for (let v = 1; v < 4; v++) ctx.lineTo(f.q[v][0], f.q[v][1])
+      ctx.closePath()
+      ctx.fillStyle = side(f.lit)
+      ctx.fill()
+      if (extra) extra(f)
+    }
+    ctx.beginPath()
+    ctx.moveTo(T[0][0], T[0][1])
+    for (let v = 1; v < 4; v++) ctx.lineTo(T[v][0], T[v][1])
+    ctx.closePath()
+    ctx.fillStyle = topFill
+    ctx.fill()
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)'
+    ctx.lineWidth = 0.8
+    ctx.stroke()
+  }
+
+  const tint = (rgb, f, a) => `rgba(${Math.round(rgb[0] * f)}, ${Math.round(rgb[1] * f)}, ${Math.round(rgb[2] * f)}, ${a})`
+
+  function drawCar(px, py, head, rgb) {
+    const q = project(px, py, 0, {})
+    // soft ground glow
+    const r = 3.4 * view.zoom * q.k
+    ctx.save()
+    ctx.translate(q.x, q.y)
+    ctx.scale(1, SQUASH)
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r)
+    g.addColorStop(0, rgba(rgb, 0.32))
+    g.addColorStop(1, rgba(rgb, 0))
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.arc(0, 0, r, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
+
+    const body = { f0: -2.3, f1: 2.3, half: 0.95, h: 0.28 }
+    const deck = { f0: -2.25, f1: 2.25, half: 0.92, h: 0.92 }
+    const bodyColor = (lit) => tint(rgb, 0.42 + 0.4 * lit, 0.97)
+    // halo behind the body
+    ctx.save()
+    ctx.shadowColor = rgba(rgb, 0.75)
+    ctx.shadowBlur = 22
+    drawPrism(px, py, head, body, deck, bodyColor, rgba(rgb, 0.95))
+    ctx.restore()
+    // body with taillights on the rear face (edge 3 runs from rear-right to rear-left)
+    drawPrism(px, py, head, body, deck, bodyColor, rgba(rgb, 0.95), (f) => {
+      if (f.e !== 3) return
+      const [a, b, , d] = f.q
+      const lamp = (u0, u1) => {
+        const P = (u, v) => [a[0] + (b[0] - a[0]) * u + (d[0] - a[0]) * v, a[1] + (b[1] - a[1]) * u + (d[1] - a[1]) * v]
+        const pts = [P(u0, 0.55), P(u1, 0.55), P(u1, 0.8), P(u0, 0.8)]
+        ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath()
+        ctx.fillStyle = 'rgba(255, 93, 108, 0.9)'
+        ctx.fill()
+      }
+      lamp(0.06, 0.26)
+      lamp(0.74, 0.94)
+    })
+    // tapered glass cabin: slanted windshield and rear window, coloured roof
+    const glass = (lit) => tint(rgb, 0.12 + 0.16 * lit, 0.94)
+    drawPrism(px, py, head,
+      { f0: -1.45, f1: 0.75, half: 0.84, h: 0.92 },
+      { f0: -1.1, f1: 0.2, half: 0.68, h: 1.46 },
+      glass, rgba(rgb, 0.9))
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath()
+    ctx.moveTo(x + r, y)
+    ctx.arcTo(x + w, y, x + w, y + h, r)
+    ctx.arcTo(x + w, y + h, x, y + h, r)
+    ctx.arcTo(x, y + h, x, y, r)
+    ctx.arcTo(x, y, x + w, y, r)
+    ctx.closePath()
+  }
+
+  function drawTether(now) {
+    if (now.err < 0.6) return
+    const a = project(now.x, now.y, 1.7, {})
+    const b = project(now.ex, now.ey, 1.7, {})
+    ctx.save()
+    ctx.strokeStyle = rgba(RGB.tether, 0.9)
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([6, 5])
+    ctx.beginPath()
+    ctx.moveTo(a.x, a.y)
+    ctx.lineTo(b.x, b.y)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = C.tether
+    for (const p of [a, b]) { ctx.beginPath(); ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2); ctx.fill() }
+    const text = `Δ ${now.err.toFixed(1)} m`
+    ctx.font = `500 12px ${FONT_NUM}`
+    const w = ctx.measureText(text).width + 18
+    const mx = (a.x + b.x) / 2 - w / 2, my = Math.min(a.y, b.y) - 30
+    ctx.fillStyle = 'rgba(10, 16, 34, 0.9)'
+    roundRect(mx, my, w, 22, 11)
+    ctx.fill()
+    ctx.strokeStyle = rgba(RGB.tether, 0.55)
+    ctx.lineWidth = 1
+    ctx.stroke()
+    ctx.fillStyle = C.tether
+    ctx.textBaseline = 'middle'
+    ctx.fillText(text, mx + 9, my + 11.5)
+    ctx.restore()
+  }
+
+  function drawScene(now) {
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0)
+    ctx.clearRect(0, 0, view.W, view.H)
+    cam.x = now.x
+    cam.y = now.y
+    cam.th = now.th
+    cam.c = Math.cos(now.th)
+    cam.s = Math.sin(now.th)
+    const cur = now.i
+    drawGrid()
+    drawRoad(cur)
+    drawTrail(cur, now)
+    drawFog()
+    if (state.t >= 0) drawMarker(0, RGB.alert, 'GNSS lost')
+    if (state.t >= BLACKOUT) drawMarker(BLACKOUT, RGB.truth, 'GNSS back')
+    drawEllipse(now)
+    // farther car first
+    const cars = [
+      { x: now.x, y: now.y, h: now.th, rgb: RGB.truth },
+      { x: now.ex, y: now.ey, h: now.eth, rgb: RGB.est },
+    ].sort((a, b) => fwd(b.x, b.y) - fwd(a.x, a.y))
+    for (const car of cars) drawCar(car.x, car.y, car.h, car.rgb)
+    drawTether(now)
+  }
+
+  function drawSpark() {
+    const w = spark.width, h = spark.height, d = view.dpr
+    sctx.setTransform(1, 0, 0, 1, 0, 0)
+    sctx.clearRect(0, 0, w, h)
+    const pad = 4 * d
+    const yMax = Math.ceil(ERR_MAX)
+    const X = (t) => ((t - T0) / (T1 - T0)) * w
+    const Y = (e) => h - pad - (e / yMax) * (h - 2 * pad)
+    // blackout window + baseline
+    sctx.fillStyle = 'rgba(255, 93, 108, 0.06)'
+    sctx.fillRect(X(0), 0, X(BLACKOUT) - X(0), h)
+    sctx.strokeStyle = 'rgba(170, 195, 255, 0.12)'
+    sctx.lineWidth = d
+    sctx.beginPath(); sctx.moveTo(0, Y(0) + 0.5); sctx.lineTo(w, Y(0) + 0.5); sctx.stroke()
+    // error so far, coloured low = blue to high = red
+    const k1 = idxOf(state.t)
+    const line = new Path2D()
+    for (let k = K0; k <= k1; k++) (k > K0 ? line.lineTo(X(S.t[k]), Y(S.err[k])) : line.moveTo(X(S.t[k]), Y(S.err[k])))
+    const grad = sctx.createLinearGradient(0, Y(0), 0, Y(yMax))
+    grad.addColorStop(0, C.est)
+    grad.addColorStop(0.55, '#b58cff')
+    grad.addColorStop(1, C.alert)
+    const area = new Path2D(line)
+    area.lineTo(X(S.t[k1]), Y(0)); area.lineTo(X(S.t[K0]), Y(0)); area.closePath()
+    const fill = sctx.createLinearGradient(0, Y(yMax), 0, Y(0))
+    fill.addColorStop(0, 'rgba(255, 93, 108, 0.22)')
+    fill.addColorStop(1, 'rgba(76, 201, 255, 0)')
+    sctx.fillStyle = fill
+    sctx.fill(area)
+    sctx.strokeStyle = grad
+    sctx.lineWidth = 1.8 * d
+    sctx.lineJoin = 'round'
+    sctx.stroke(line)
+    // current value
+    sctx.fillStyle = C.ink
+    sctx.beginPath(); sctx.arc(X(S.t[k1]), Y(S.err[k1]), 2.6 * d, 0, Math.PI * 2); sctx.fill()
+    sctx.font = `${10 * d}px ${FONT_NUM}`
+    sctx.fillStyle = 'rgba(163, 176, 207, 0.7)'
+    sctx.textBaseline = 'top'
+    sctx.textAlign = 'right'
+    sctx.fillText(`${yMax} m`, w - 2 * d, 0)
+    sctx.textAlign = 'left'
+  }
+
+  // ================================================================ panel + HUD
+  let lastLogKey = ''
+  function updateUI(now) {
+    const t = state.t
+    setText(ui.err, now.err.toFixed(1))
+    if (t <= 0) {
+      setText(ui.drift, '–'); setText(ui.driftLabel, 'drift')
+    } else if (t <= BLACKOUT) {
+      setText(ui.drift, ((100 * now.err) / Math.max(now.dist, 1)).toFixed(2)); setText(ui.driftLabel, 'drift')
+    } else {
+      setText(ui.drift, FINAL.drift.toFixed(2)); setText(ui.driftLabel, 'final drift')
+    }
+    const blk = Math.min(Math.max(t, 0), BLACKOUT)
+    ui.barFill.style.width = `${(blk / BLACKOUT) * 100}%`
+    ui.bar.dataset.done = String(t >= BLACKOUT)
+    setText(ui.blk, `${blk.toFixed(1)} / 60 s`)
+    setText(ui.ekf, (now.ev * 3.6).toFixed(1))
+    setText(ui.mn, Number.isNaN(now.mn) ? 'idle' : (now.mn * 3.6).toFixed(1))
+    setText(ui.truth, (now.v * 3.6).toFixed(1))
+    setText(ui.clock, fmtT(t))
+    if (!state.dragging) ui.timeline.value = t.toFixed(1)
+    ui.timeline.style.setProperty('--p', `${((t - T0) / (T1 - T0)) * 100}%`)
+    ui.timeline.setAttribute('aria-valuetext', fmtT(t))
+
+    const gnssState = t < 0 ? 'fix' : t < BLACKOUT ? 'lost' : 'back'
+    ui.gnss.dataset.state = gnssState === 'lost' ? 'lost' : 'fix'
+    setText(ui.gnssText, gnssState === 'fix' ? 'GNSS fix' : gnssState === 'lost' ? 'GNSS lost' : 'GNSS reacquired')
+    setText(ui.gnssSub, gnssState === 'fix' ? 'locked' : gnssState === 'lost' ? `${Math.floor(t)} s` : 're-anchored')
+
+    // last four telemetry lines up to now
+    let n = 0
+    while (n < LOG.length && LOG[n].t <= t + 1e-6) n++
+    const lines = LOG.slice(Math.max(0, n - 4), n)
+    const key = lines.map((l) => l.text).join('|')
+    if (key !== lastLogKey) {
+      lastLogKey = key
+      ui.log.replaceChildren(...lines.map((l) => { const d = document.createElement('div'); d.textContent = l.text; return d }))
+    }
+
+    const playing = state.playing && t < T1
+    setText(ui.playText, playing ? 'Pause' : t >= T1 ? 'Replay' : 'Play')
+    ui.play.setAttribute('aria-label', playing ? 'Pause' : 'Play')
+    const d = playing ? 'M3 2h3v10H3zM8 2h3v10H8z' : 'M3.5 1.8v10.4L12 7z'
+    const path = ui.playIcon.firstElementChild
+    if (path.getAttribute('d') !== d) path.setAttribute('d', d)
+  }
+
+  // ================================================================ notifications
+  const ICONS = {
+    danger: '<svg viewBox="0 0 18 18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" d="M9 2.2 16.3 15H1.7z"/><path stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M9 7v3.6M9 12.8v.1"/></svg>',
+    caution: '<svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M9 5.2v4.6M9 12.6v.1"/></svg>',
+    info: '<svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M9 8.2v4.6M9 5.3v.1"/></svg>',
+    success: '<svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="1.5"/><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="m5.8 9.2 2.2 2.2 4.2-4.6"/></svg>',
+    summary: '<svg viewBox="0 0 18 18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M3 14.5h12M5 12V8.5M9 12V4.5M13 12V7"/></svg>',
+  }
+  function notify(ev) {
+    const el = document.createElement('div')
+    el.className = 'toast'
+    el.dataset.kind = ev.kind
+    el.innerHTML = `${ICONS[ev.kind]}<div><div class="toast-title"></div><div class="toast-body"></div></div><span class="toast-time"></span>`
+    el.querySelector('.toast-title').textContent = ev.title
+    el.querySelector('.toast-body').textContent = ev.body
+    el.querySelector('.toast-time').textContent = fmtT(ev.t)
+    ui.toasts.prepend(el)
+    while (ui.toasts.children.length > 3) ui.toasts.lastElementChild.remove()
+    requestAnimationFrame(() => el.classList.add('in'))
+    setTimeout(() => {
+      el.classList.add('out')
+      setTimeout(() => el.remove(), reduceMotion ? 0 : 400)
+    }, 6000)
+  }
+  function fireEvents(from, to) {
+    for (const ev of EVENTS) if (ev.t > from && ev.t <= to) notify(ev)
+  }
+
+  // ================================================================ controls
+  function seek(t) {
+    state.t = Math.min(Math.max(t, T0), T1)
+    firedUpTo = state.t // scrubbing never replays notifications
+  }
+  function restart() {
+    ui.toasts.replaceChildren()
+    state.t = T0
+    firedUpTo = T0 - 1
+    state.playing = true
+  }
+  function togglePlay() {
+    if (state.t >= T1) { restart(); return }
+    state.playing = !state.playing
+  }
+  function setSpeed(v) {
+    state.speed = v
+    for (const b of document.querySelectorAll('.speeds button')) b.setAttribute('aria-checked', String(Number(b.dataset.speed) === v))
+  }
+
+  ui.play.addEventListener('click', togglePlay)
+  ui.restart.addEventListener('click', restart)
+  for (const b of document.querySelectorAll('.speeds button')) b.addEventListener('click', () => setSpeed(Number(b.dataset.speed)))
+  ui.timeline.addEventListener('input', () => seek(Number(ui.timeline.value)))
+  ui.timeline.addEventListener('pointerdown', () => { state.dragging = true })
+  window.addEventListener('pointerup', () => { state.dragging = false })
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return
+    const onButton = e.target instanceof HTMLButtonElement
+    if (e.code === 'Space' && !onButton) { e.preventDefault(); togglePlay() }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault()
+      seek(state.t + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 5 : 1))
+    } else if (e.key === 'r' || e.key === 'R') restart()
+  })
+  window.addEventListener('resize', resize)
+
+  // ================================================================ loop
+  let last = performance.now()
+  function frame(nowMs) {
+    const dt = Math.min((nowMs - last) / 1000, 0.1)
+    last = nowMs
+    if (state.playing && state.t < T1) {
+      state.t = Math.min(state.t + dt * state.speed, T1)
+      fireEvents(firedUpTo, state.t)
+      firedUpTo = state.t
+      if (state.t >= T1) state.playing = false
+    }
+    const now = sampleAt(state.t)
+    drawScene(now)
+    drawSpark()
+    updateUI(now)
+    requestAnimationFrame(frame)
+  }
+
+  resize()
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize)
+  requestAnimationFrame(frame)
+})()
+</script>
+</body>
+</html>
