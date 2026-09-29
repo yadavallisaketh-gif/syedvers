@@ -279,11 +279,13 @@ class NavigationEngine:
                                 np.deg2rad(self.mc["heading_sigma_deg"]) if confident else None)
 
     def _record(self, t: float, mode: str):
-        s = self.ekf.s
-        self.history.append((t, s[X], s[Y], s[VF], s[VL], s[YAW], float(np.sqrt(self.ekf.P[X, X] + self.ekf.P[Y, Y])),
-                             s[X] + self._disp_offset[0], s[Y] + self._disp_offset[1], mode, self.initialised))
+        s, P = self.ekf.s, self.ekf.P
+        self.history.append((t, s[X], s[Y], s[VF], s[VL], s[YAW], float(np.sqrt(P[X, X] + P[Y, Y])),
+                             s[X] + self._disp_offset[0], s[Y] + self._disp_offset[1], mode, self.initialised,
+                             float(P[X, X]), float(P[Y, Y]), float(P[X, Y])))
 
     def trajectory(self) -> pd.DataFrame:
-        """x, y: filter estimate (scored). disp_x, disp_y: smoothed position for the UI."""
+        """x, y: filter estimate (scored). disp_x, disp_y: smoothed position for the UI.
+        p_xx, p_yy, p_xy: position block of the EKF covariance (m^2), for the 1-sigma ellipse."""
         return pd.DataFrame(self.history, columns=["t", "x", "y", "v_f", "v_l", "yaw", "pos_sigma",
-                                                   "disp_x", "disp_y", "mode", "init"])
+                                                   "disp_x", "disp_y", "mode", "init", "p_xx", "p_yy", "p_xy"])

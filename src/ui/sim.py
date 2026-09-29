@@ -11,7 +11,7 @@ only for display and scoring, never as an engine input.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -89,11 +89,15 @@ class _RecordingModel:
 
 @dataclass
 class Replay:
-    frame: pd.DataFrame        # per-sample: t, rel_t, x, y, lat, lon, v_f, mode, truth_*, motionnet_speed
+    frame: pd.DataFrame        # per-sample: t, rel_t, x, y, lat, lon, v_f, v_l, yaw, pos_sigma, p_xx/p_yy/p_xy,
+                               # mode, truth_*, motionnet_speed
     metrics: dict              # blackout_metrics() of this window (scored after the run)
     window: BlackoutWindow
     gnss_updates_in_blackout: int
     mount_yaw_deg: float
+    # every EKF measurement update of the run: t, source, accepted, nis (for the web telemetry console)
+    updates: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=["t", "source", "accepted", "nis"]))
+    anomalies: list = field(default_factory=list)   # (t, kind, magnitude, mode) from the anomaly detector
 
 
 def replay_window(cfg: dict, drive, w: BlackoutWindow, model: MotionModel, network) -> Replay:
@@ -115,10 +119,10 @@ def replay_window(cfg: dict, drive, w: BlackoutWindow, model: MotionModel, netwo
     m = blackout_metrics(traj, truth, w)
 
     lat0, lon0 = drive.origin
-    f = traj[["t", "x", "y", "v_f", "mode"]].copy()
+    f = traj[["t", "x", "y", "v_f", "v_l", "yaw", "pos_sigma", "p_xx", "p_yy", "p_xy", "mode"]].copy()
     f["rel_t"] = f["t"] - w.t_start
     f["lat"], f["lon"] = local_to_latlon(f["x"].to_numpy(), f["y"].to_numpy(), lat0, lon0)
-    f["truth_x"], f["truth_y"], f["truth_speed"] = truth.x, truth.y, truth.speed
+    f["truth_x"], f["truth_y"], f["truth_speed"], f["truth_yaw"] = truth.x, truth.y, truth.speed, truth.yaw
     f["truth_lat"], f["truth_lon"] = local_to_latlon(truth.x, truth.y, lat0, lon0)
     f["denied"] = w.contains(f["t"].to_numpy())
     if rec.log:
@@ -131,7 +135,9 @@ def replay_window(cfg: dict, drive, w: BlackoutWindow, model: MotionModel, netwo
         f = f.drop(columns="mn_t")
     else:
         f["motionnet_speed"] = f["motionnet_sigma"] = np.nan
-    return Replay(f, m, w, gnss_inside, al.mount_yaw_deg)
+    updates = pd.DataFrame([(u.t, u.source, u.accepted, u.nis) for u in eng.ekf.log],
+                           columns=["t", "source", "accepted", "nis"])
+    return Replay(f, m, w, gnss_inside, al.mount_yaw_deg, updates, list(eng.anomalies))
 
 
 def display_slice(r: Replay, before_s: float = 20.0, after_s: float = 15.0, step: int = 5) -> pd.DataFrame:

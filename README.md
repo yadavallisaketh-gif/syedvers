@@ -12,6 +12,42 @@ IO-VNBD replay / Android / external IMU  ──►  SensorSample stream
                          ──►  position, speed, heading, mode (GNSS+INS / DEAD RECKONING)
 ```
 
+## 3D web dashboard (`web/`)
+
+A Python-backed dead-reckoning engine that keeps estimating a car's position through a GNSS blackout
+using only a smartphone IMU. The web front-end replays a blackout in 3D: the true path against the
+engine's estimate, its GNSS/dead-reckoning mode, speed and accumulated drift.
+
+![3D replay dashboard](docs/web_dashboard.png)
+
+```bash
+python scripts/export_web_data.py     # real engine replays -> web/public/data (needs the dataset + torch)
+cd web && npm install && npm run dev  # http://localhost:5173
+npm run build                         # type-check + production build in web/dist
+```
+
+- **Real engine output.** `scripts/export_web_data.py` runs `src/ui/sim.replay_window` (the same path as the
+  Streamlit app, variant D, `sih_mvp` profile) on all 12 held-out 60 s windows. It writes every 10 Hz sample from
+  20 s before GNSS loss to 15 s after it returns, plus every EKF measurement update. The export **fails**
+  if a replay's drift differs from `results/sih/eval_windows_sih_mvp_anomaly.csv`. It does not differ: all 12 match
+  (60 s median 9.91%). `--summary-only` writes only the verified results, without the dataset.
+  Without an export the app runs on a labelled `SYNTHETIC` placeholder.
+- **Scene** (React Three Fiber, 1 unit = 1 m):
+  - matte PBR (`meshStandardMaterial`, roughness >= 0.7, metalness 0.1);
+  - a soft key light whose shadow follows the car, a procedural studio environment (no HDRI download),
+    and N8AO ambient occlusion.
+  - Layers: the estimated car and a translucent ground-truth ghost; the ribbons of both tracks; a dashed
+    **drift tether** between the cars, labelled with the live error; and the EKF's **1σ uncertainty volume**.
+    The volume's footprint is the real covariance ellipse (from `p_xx`, `p_yy`, `p_xy`). Its dome height is
+    for display only.
+- **Panel**: mode indicator, transport, live error / drift readout, kinematics, speed trace (hover, click to seek),
+  scene layers, window picker with verified results. A **raw telemetry console** streams EKF state, MotionNet
+  output, drift, per-second measurement-update counts, χ² rejections and mode events.
+- **Keys**: `Space` play/pause · `←/→` scrub 1 s (`Shift` 5 s) · `1` `2` `3` chase / orbit / top-down.
+  Deep links: `?replay=S1_1230&t=42&cam=plan`.
+- **Checks**: `npm run screenshot` (with `npx vite preview` running) captures desktop and mobile screenshots
+  and fails if the page logs an error or requests anything outside its own origin (fonts are bundled).
+
 ## Results: Hackathon MVP (passenger car)
 
 **60 s GNSS blackout: 9.9% median drift** on held-out test drives. See it replayed live with
@@ -136,6 +172,8 @@ python -m src.download_data                  # ALL 72 drives, ~430 MB, checksum-
 python -m pytest -q                          # 73 unit tests, no dataset needed
 python -m src.evaluate --config configs/sih_mvp.yaml --tag sih_mvp --plots 0   # benchmark: 60 s median drift 9.91%
 streamlit run src/ui/app.py                  # replay dashboard
+python scripts/export_web_data.py            # data for the 3D dashboard (web/)
+cd web && npm install && npm run dev         # 3D dashboard at http://localhost:5173
 ```
 
 Optional:
@@ -236,6 +274,8 @@ docs/DETAILED_MVP_REPORT.md  MVP technical report: scope, architecture, verified
 docs/android_integration.md  SensorManager / Location → SensorSample plan
 src/ui/app.py, src/ui/sim.py Streamlit replay dashboard (real engine, test drives)
 scripts/export_onnx.py       MotionNet -> ONNX for on-device inference, with parity check
+scripts/export_web_data.py   verified results + engine replays -> web/public/data (JSON, schema 1)
+web/                         3D replay dashboard: React Three Fiber + TypeScript + Tailwind (see above)
 ```
 
 ## Change log of fixes found by testing
